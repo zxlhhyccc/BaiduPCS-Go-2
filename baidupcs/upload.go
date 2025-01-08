@@ -2,7 +2,6 @@ package baidupcs
 
 import (
 	"errors"
-	"fmt"
 	"math/rand"
 	"net/http"
 	"path"
@@ -15,13 +14,11 @@ import (
 
 const (
 	// MaxUploadBlockSize 最大上传的文件分片大小
-	MaxUploadBlockSize = 2 * converter.GB
+	MaxUploadBlockSize = 16 * converter.MB
 	// MinUploadBlockSize 最小的上传的文件分片大小
 	MinUploadBlockSize = 4 * converter.MB
 	// MaxRapidUploadSize 秒传文件支持的最大文件大小
 	MaxRapidUploadSize = 20 * converter.GB
-	// RecommendUploadBlockSize 推荐的上传的文件分片大小
-	RecommendUploadBlockSize = 1 * converter.GB
 	// SliceMD5Size 计算 slice-md5 所需的长度
 	SliceMD5Size = 256 * converter.KB
 	// EmptyContentMD5 空串的md5
@@ -110,34 +107,27 @@ func randomifyMD5(md5 string) string {
 }
 
 // RapidUpload 秒传文件
-func (pcs *BaiduPCS) RapidUpload(targetPath, contentMD5, sliceMD5, crc32 string, length int64) (pcsError pcserror.Error) {
+func (pcs *BaiduPCS) RapidUpload(targetPath, contentMD5, sliceMD5, dataContent, crc32 string, offset, length, totalSize, dataTime int64) (pcsError pcserror.Error) {
 	defer func() {
 		if pcsError == nil {
 			// 更新缓存
 			pcs.deleteCache([]string{path.Dir(targetPath)})
 		}
 	}()
+	pcsError = pcs.rapidUploadV2(targetPath, strings.ToLower(contentMD5), strings.ToLower(sliceMD5), dataContent, crc32, offset, length, totalSize, dataTime)
+	return
+}
 
-	// 尝试全大写
-	pcsError = pcs.rapidUpload(targetPath, strings.ToUpper(contentMD5), strings.ToUpper(sliceMD5), crc32, length)
-	if pcsError == nil || pcsError.GetRemoteErrCode() != 31079 {
-		return
-	}
-
-	// 尝试全小写
-	pcsError = pcs.rapidUpload(targetPath, strings.ToLower(contentMD5), strings.ToLower(sliceMD5), crc32, length)
-	if pcsError == nil || pcsError.GetRemoteErrCode() != 31079 {
-		return
-	}
-
-	// 尝试随机大小写
-	pcsError = pcs.rapidUpload(targetPath, randomifyMD5(contentMD5), randomifyMD5(sliceMD5), crc32, length)
-	if pcsError == nil || pcsError.GetRemoteErrCode() != 31079 {
-		return
-	}
-
-	// 尝试 xpan 接口
-	return pcs.rapidUploadV2(targetPath, strings.ToLower(contentMD5), length)
+// APIRapidUpload openapi秒传文件
+func (pcs *BaiduPCS) APIRapidUpload(targetPath, contentMD5, sliceMD5, crc32 string, length int64) (pcsError pcserror.Error) {
+	defer func() {
+		if pcsError == nil {
+			// 更新缓存
+			pcs.deleteCache([]string{path.Dir(targetPath)})
+		}
+	}()
+	pcsError = pcs.rapidUpload(targetPath, strings.ToLower(contentMD5), strings.ToLower(sliceMD5), "", length)
+	return
 }
 
 func (pcs *BaiduPCS) rapidUpload(targetPath, contentMD5, sliceMD5, crc32 string, length int64) (pcsError pcserror.Error) {
@@ -146,41 +136,16 @@ func (pcs *BaiduPCS) rapidUpload(targetPath, contentMD5, sliceMD5, crc32 string,
 		return
 	}
 	defer dataReadCloser.Close()
-	return pcserror.DecodePCSJSONError(OperationRapidUpload, dataReadCloser)
+	return pcserror.DecodePanJSONError(OperationRapidUpload, dataReadCloser)
 }
 
-func (pcs *BaiduPCS) rapidUploadV2(targetPath, contentMD5 string, length int64) (pcsError pcserror.Error) {
-	dataReadCloser, pcsError := pcs.PrepareRapidUploadV2(targetPath, contentMD5, length)
+func (pcs *BaiduPCS) rapidUploadV2(targetPath, contentMD5, sliceMD5, dataContent, crc32 string, offset, length, totalSize, dataTime int64) (pcsError pcserror.Error) {
+	dataReadCloser, pcsError := pcs.PrepareRapidUploadV2(targetPath, contentMD5, sliceMD5, dataContent, crc32, offset, length, totalSize, dataTime)
 	if pcsError != nil {
 		return
 	}
 	defer dataReadCloser.Close()
-
-	errInfo := pcserror.NewPanErrorInfo(OperationRapidUpload)
-	jsonData := uploadCreateJSON{
-		PanErrorInfo: errInfo,
-	}
-	pcsError = pcserror.HandleJSONParse(OperationRapidUpload, dataReadCloser, &jsonData)
-	if pcsError != nil {
-		return
-	}
-
-	switch jsonData.ErrNo {
-	case 0:
-		return
-	case 2:
-		errInfo.ErrType = pcserror.ErrTypeOthers
-		errInfo.Err = ErrUploadMD5Unknown
-		return errInfo
-	case -8:
-		errInfo.ErrType = pcserror.ErrTypeOthers
-		errInfo.Err = ErrUploadFileExists
-		return errInfo
-	default:
-		errInfo.ErrType = pcserror.ErrTypeOthers
-		errInfo.Err = fmt.Errorf("errno=%d", jsonData.ErrNo)
-		return errInfo
-	}
+	return pcserror.DecodeXPanJSONError(OperationRapidUpload, dataReadCloser)
 }
 
 // RapidUploadNoCheckDir 秒传文件, 不进行目录检查, 会覆盖掉同名的目录!

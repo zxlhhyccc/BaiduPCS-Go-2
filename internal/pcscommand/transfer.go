@@ -3,63 +3,65 @@ package pcscommand
 import (
 	"encoding/base64"
 	"fmt"
+	"github.com/qjfoidnh/BaiduPCS-Go/baidupcs"
 	"path"
 	"regexp"
 	"strconv"
 	"strings"
-
-	"github.com/qjfoidnh/BaiduPCS-Go/baidupcs"
+	"time"
 )
 
 // RunShareTransfer 执行分享链接转存到网盘
 func RunShareTransfer(params []string, opt *baidupcs.TransferOption) {
 	var link string
-	var extracode string
+	var extraCode string
 	if len(params) == 1 {
 		link = params[0]
 		if strings.Contains(link, "bdlink=") || !strings.Contains(link, "pan.baidu.com/") {
-			RunRapidTransfer(link)
+			//RunRapidTransfer(link, opt.Rname)
+			fmt.Printf("%s失败: %s\n", baidupcs.OperationShareFileSavetoLocal, "秒传已不再被支持")
 			return
 		}
-		extracode = "none"
+		extraCode = "none"
 		if strings.Contains(link, "?pwd=") {
-			extracode = strings.Split(link, "?pwd=")[1]
+			extraCode = strings.Split(link, "?pwd=")[1]
 			link = strings.Split(link, "?pwd=")[0]
 		}
 	} else if len(params) == 2 {
 		link = params[0]
-		extracode = params[1]
+		extraCode = params[1]
 	}
 	if link[len(link)-1:] == "/" {
 		link = link[0 : len(link)-1]
 	}
-	featurestrs := strings.Split(link, "/")
-	featurestr := featurestrs[len(featurestrs)-1]
-	if strings.Contains(featurestr, "init?") {
-		featurestr = "1" + strings.Split(featurestr, "=")[1]
+	featureStrs := strings.Split(link, "/")
+	featureStr := featureStrs[len(featureStrs)-1]
+	if strings.Contains(featureStr, "init?") {
+		featureStr = "1" + strings.Split(featureStr, "=")[1]
 	}
-	if len(featurestr) > 23 || featurestr[0:1] != "1" || len(extracode) != 4 {
+	if len(featureStr) > 23 || featureStr[0:1] != "1" || len(extraCode) != 4 {
 		fmt.Printf("%s失败: %s\n", baidupcs.OperationShareFileSavetoLocal, "链接地址或提取码非法")
 		return
 	}
 	pcs := GetBaiduPCS()
-	tokens := pcs.AccessSharePage(featurestr, true)
+	tokens := pcs.AccessSharePage(featureStr, true)
 	if tokens["ErrMsg"] != "0" {
 		fmt.Printf("%s失败: %s\n", baidupcs.OperationShareFileSavetoLocal, tokens["ErrMsg"])
 		return
 	}
-	// pcs.UpdatePCSCookies(true)
-	var vefiryurl string
-	featuremap := make(map[string]string)
-	featuremap["surl"] = featurestr[1:]
-	featuremap["bdstoken"] = tokens["bdstoken"]
-	if extracode != "none" {
 
-		vefiryurl = pcs.GenerateShareQueryURL("verify", featuremap).String()
-		res := pcs.PostShareQuery(vefiryurl, featurestr[1:], map[string]string{
-			"pwd":       extracode,
-			"vcode":     "",
-			"vcode_str": "",
+	if extraCode != "none" {
+		verifyUrl := pcs.GenerateShareQueryURL("verify", map[string]string{
+			"shareid":    tokens["shareid"],
+			"time":       strconv.Itoa(int(time.Now().UnixMilli())),
+			"clienttype": "1",
+			"uk":         tokens["share_uk"],
+		}).String()
+		res := pcs.PostShareQuery(verifyUrl, link, map[string]string{
+			"pwd":       extraCode,
+			"vcode":     "null",
+			"vcode_str": "null",
+			"bdstoken":  tokens["bdstoken"],
 		})
 		if res["ErrMsg"] != "0" {
 			fmt.Printf("%s失败: %s\n", baidupcs.OperationShareFileSavetoLocal, res["ErrMsg"])
@@ -68,37 +70,45 @@ func RunShareTransfer(params []string, opt *baidupcs.TransferOption) {
 	}
 	pcs.UpdatePCSCookies(true)
 
-	tokens = pcs.AccessSharePage(featurestr, false)
+	tokens = pcs.AccessSharePage(featureStr, false)
 	if tokens["ErrMsg"] != "0" {
 		fmt.Printf("%s失败: %s\n", baidupcs.OperationShareFileSavetoLocal, tokens["ErrMsg"])
 		return
 	}
-	metajsonstr := tokens["metajson"]
-	trans_metas := pcs.ExtractShareInfo(metajsonstr)
+	featureMap := map[string]string{
+		"bdstoken": tokens["bdstoken"],
+		"root":     "1",
+		"web":      "5",
+		"app_id":   baidupcs.PanAppID,
+		"shorturl": featureStr[1:],
+		"channel":  "chunlei",
+	}
+	queryShareInfoUrl := pcs.GenerateShareQueryURL("list", featureMap).String()
+	transMetas := pcs.ExtractShareInfo(queryShareInfoUrl, tokens["shareid"], tokens["share_uk"], tokens["bdstoken"])
 
-	if trans_metas["ErrMsg"] != "0" {
-		fmt.Printf("%s失败: %s\n", baidupcs.OperationShareFileSavetoLocal, trans_metas["ErrMsg"])
+	if transMetas["ErrMsg"] != "success" {
+		fmt.Printf("%s失败: %s\n", baidupcs.OperationShareFileSavetoLocal, transMetas["ErrMsg"])
 		return
 	}
-	trans_metas["path"] = GetActiveUser().Workdir
-	if trans_metas["item_num"] != "1" && opt.Collect {
-		trans_metas["filename"] += "等文件"
-		trans_metas["path"] = path.Join(GetActiveUser().Workdir, trans_metas["filename"])
-		pcs.Mkdir(trans_metas["path"])
+	transMetas["path"] = GetActiveUser().Workdir
+	if transMetas["item_num"] != "1" && opt.Collect {
+		transMetas["filename"] += "等文件"
+		transMetas["path"] = path.Join(GetActiveUser().Workdir, transMetas["filename"])
+		pcs.Mkdir(transMetas["path"])
 	}
-	trans_metas["referer"] = "https://pan.baidu.com/s/" + featurestr
+	transMetas["referer"] = "https://pan.baidu.com/s/" + featureStr
 	pcs.UpdatePCSCookies(true)
-	resp := pcs.GenerateRequestQuery("POST", trans_metas)
+	resp := pcs.GenerateRequestQuery("POST", transMetas)
 	if resp["ErrNo"] != "0" {
 		fmt.Printf("%s失败: %s\n", baidupcs.OperationShareFileSavetoLocal, resp["ErrMsg"])
-		if resp["ErrNo"] == "4" {
-			trans_metas["shorturl"] = featurestr
-			pcs.SuperTransfer(trans_metas, resp["limit"]) // 试验性功能
-		}
+		//if resp["ErrNo"] == "4" {
+		//	transMetas["shorturl"] = featureStr
+		//	pcs.SuperTransfer(transMetas, resp["limit"]) // 试验性功能, 当前未启用
+		//}
 		return
 	}
 	if opt.Collect {
-		resp["filename"] = trans_metas["filename"]
+		resp["filename"] = transMetas["filename"]
 	}
 	fmt.Printf("%s成功, 保存了%s到当前目录\n", baidupcs.OperationShareFileSavetoLocal, resp["filename"])
 	if opt.Download {
@@ -110,7 +120,7 @@ func RunShareTransfer(params []string, opt *baidupcs.TransferOption) {
 }
 
 // RunRapidTransfer 执行秒传链接解析及保存
-func RunRapidTransfer(link string) {
+func RunRapidTransfer(link string, rnameOpt ...bool) {
 	if strings.Contains(link, "bdlink=") || strings.Contains(link, "bdpan://") {
 		r, _ := regexp.Compile(`(bdlink=|bdpan://)([^\s]+)`)
 		link1 := r.FindStringSubmatch(link)[2]
@@ -121,22 +131,24 @@ func RunRapidTransfer(link string) {
 		}
 		link = string(decodeBytes)
 	}
+	rname := false
+	if len(rnameOpt) > 0 {
+		rname = rnameOpt[0]
+	}
 	link = strings.TrimSpace(link)
 	substrs := strings.SplitN(link, "#", 4)
 	if len(substrs) == 4 {
 		md5, slicemd5 := substrs[0], substrs[1]
-		length, _ := strconv.ParseInt(substrs[2], 10, 64)
-		filename := path.Join(GetActiveUser().Workdir, substrs[3])
-		RunRapidUpload(filename, md5, slicemd5, "", length)
-		return
+		size, _ := strconv.ParseInt(substrs[2], 10, 64)
+		filename := path.Join(GetActiveUser().Workdir, randReplaceStr(substrs[3], rname))
+		RunRapidUpload(filename, md5, slicemd5, size)
+	} else if len(substrs) == 3 {
+		md5 := substrs[0]
+		size, _ := strconv.ParseInt(substrs[1], 10, 64)
+		filename := path.Join(GetActiveUser().Workdir, randReplaceStr(substrs[2], rname))
+		RunRapidUpload(filename, md5, "", size)
+	} else {
+		fmt.Printf("%s失败: %s\n", baidupcs.OperationRapidLinkSavetoLocal, "秒传链接格式错误")
 	}
-	substrs = strings.Split(link, "|")
-	if len(substrs) == 4 {
-		md5, slicemd5 := substrs[2], substrs[3]
-		length, _ := strconv.ParseInt(substrs[1], 10, 64)
-		filename := path.Join(GetActiveUser().Workdir, substrs[0])
-		RunRapidUpload(filename, md5, slicemd5, "", length)
-		return
-	}
-	fmt.Printf("%s失败: %s\n", baidupcs.OperationRapidLinkSavetoLocal, "秒传链接格式错误")
+	return
 }
